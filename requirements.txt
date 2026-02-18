@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pillow
+rawpy
+torch
+transformers
+accelerate
+safetensors

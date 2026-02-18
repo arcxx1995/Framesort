@@ -1,3 +1,4 @@
+# Framesort
 # AI Photo Organizer using OpenClaw --- Complete MVP Guide (Electron Stack)
 
 ## 1. MVP Architecture

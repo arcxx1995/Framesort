@@ -194,3 +194,10 @@ ipcMain.handle("window-close", async (event) => {
     currentWindow.close();
   }
 });
+
+ipcMain.handle("window-minimize", async (event) => {
+  const currentWindow = BrowserWindow.fromWebContents(event.sender);
+  if (currentWindow) {
+    currentWindow.minimize();
+  }
+});

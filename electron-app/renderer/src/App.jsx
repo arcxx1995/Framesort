@@ -306,6 +306,7 @@ export function App() {
   const [authPassword, setAuthPassword] = useState("");
   const [authReady, setAuthReady] = useState(false);
   const [authUser, setAuthUser] = useState(null);
+  const [authBypassEnabled, setAuthBypassEnabled] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState("");
   const [firebaseAuth, setFirebaseAuth] = useState(null);
@@ -432,6 +433,15 @@ export function App() {
       await api.closeApp();
     } catch (error) {
       setStatus(error.message || "Unable to close app.");
+    }
+  }
+
+  async function minimizeWindow() {
+    try {
+      const api = requireAPI();
+      await api.minimizeApp();
+    } catch (error) {
+      setStatus(error.message || "Unable to minimize app.");
     }
   }
 
@@ -654,6 +664,9 @@ export function App() {
     setFirebaseAuth(authClient.auth);
     const unsubscribe = onAuthStateChanged(authClient.auth, (user) => {
       setAuthUser(user);
+      if (user) {
+        setAuthBypassEnabled(false);
+      }
       setAuthReady(true);
     });
 
@@ -708,6 +721,12 @@ export function App() {
   }
 
   async function logout() {
+    if (authBypassEnabled && !authUser) {
+      setAuthBypassEnabled(false);
+      setStatus("Exited bypass mode.");
+      return;
+    }
+
     if (!firebaseAuth) {
       return;
     }
@@ -723,10 +742,27 @@ export function App() {
     }
   }
 
+  function enableAuthBypass() {
+    setAuthError("");
+    setAuthBypassEnabled(true);
+    setStatus("Auth bypass enabled for this session.");
+  }
+
+  const authWindowControls = (
+    <div className="auth-window-controls">
+      <button type="button" className="window-minimize-button" onClick={minimizeWindow} aria-label="Minimize app">-</button>
+      <button type="button" className="window-close-button" onClick={closeWindow} aria-label="Close app">X</button>
+    </div>
+  );
+
+  const sessionIdentity = authUser?.email || (authBypassEnabled ? "Bypass Session" : "Authenticated");
+  const sessionActionLabel = authBypassEnabled && !authUser ? "Back to Login" : "Logout";
+
   if (!authReady) {
     return (
       <div className="app-frame">
         <div className="app-shell auth-shell with-background" style={authShellStyle}>
+          {authWindowControls}
           <div className="auth-card">
             <h2>FrameSort</h2>
             <p className="auth-subtitle">Initializing authentication...</p>
@@ -740,21 +776,22 @@ export function App() {
     return (
       <div className="app-frame">
         <div className="app-shell auth-shell with-background" style={authShellStyle}>
+          {authWindowControls}
           <div className="auth-card">
             <h2>Firebase Auth Setup Required</h2>
             <p className="auth-subtitle">{firebaseAuthError}</p>
             <p className="auth-hint">Add your Firebase project values in `electron-app/renderer/src/firebaseConfig.js` and restart the app.</p>
-            <button className="window-close-button" onClick={closeWindow} aria-label="Close app">X</button>
           </div>
         </div>
       </div>
     );
   }
 
-  if (!authUser) {
+  if (!authUser && !authBypassEnabled) {
     return (
       <div className="app-frame">
         <div className="app-shell auth-shell with-background" style={authShellStyle}>
+          {authWindowControls}
           <form className="auth-card auth-form" onSubmit={submitAuth}>
             <h2>{authMode === AUTH_MODE_SIGN_IN ? "Login" : "Create Account"}</h2>
             <p className="auth-subtitle">Login with email or continue with Google.</p>
@@ -802,7 +839,9 @@ export function App() {
               Continue with Google
             </button>
 
-            <button type="button" className="window-close-button auth-close" onClick={closeWindow} aria-label="Close app">X</button>
+            <button type="button" className="auth-bypass-button" onClick={enableAuthBypass} disabled={authBusy}>
+              Enter App (Temporary Bypass)
+            </button>
           </form>
         </div>
       </div>
@@ -818,7 +857,7 @@ export function App() {
             <p className="subtitle">AI-assisted photo organization dashboard</p>
           </div>
         <div className="topbar-right">
-          <div className="auth-chip" title={authUser.email || "Authenticated user"}>{authUser.email || "Authenticated"}</div>
+          <div className="auth-chip" title={sessionIdentity}>{sessionIdentity}</div>
           <div className={`health-chip ${state.backendHealth}`}>Backend: {healthLabel}</div>
           <div className={`gpu-chip ${gpuClass}`}>{gpuLabel}</div>
           <button
@@ -828,7 +867,7 @@ export function App() {
           >
             {gpuButtonLabel}
           </button>
-          <button className="auth-logout-button" onClick={logout} disabled={authBusy}>Logout</button>
+          <button className="auth-logout-button" onClick={logout} disabled={authBusy}>{sessionActionLabel}</button>
           <button onClick={() => refreshBackendHealth(false)} disabled={isBusy}>Refresh Backend</button>
           <button className="window-close-button" onClick={closeWindow} aria-label="Close app">X</button>
         </div>

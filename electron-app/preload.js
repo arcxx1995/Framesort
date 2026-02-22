@@ -7,5 +7,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
   organizeDryRun: (path) => ipcRenderer.invoke("organize-folder-dry-run", path),
   organizeFolder: (path) => ipcRenderer.invoke("organize-folder", path),
   setGpuAcceleration: (enabled) => ipcRenderer.invoke("gpu-acceleration-set", enabled),
+  minimizeApp: () => ipcRenderer.invoke("window-minimize"),
   closeApp: () => ipcRenderer.invoke("window-close"),
 });

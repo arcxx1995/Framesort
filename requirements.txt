@@ -3,6 +3,8 @@ uvicorn
 pillow
 rawpy
 torch
-transformers
+transformers==4.57.6
 accelerate
 safetensors
+einops
+timm

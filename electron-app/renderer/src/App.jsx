@@ -1,13 +1,27 @@
-import React, { useEffect, useMemo, useReducer } from "react";
+import React, { useEffect, useMemo, useReducer, useState } from "react";
+import {
+  createUserWithEmailAndPassword,
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signInWithPopup,
+  signInWithEmailAndPassword,
+  signOut as firebaseSignOut,
+} from "firebase/auth";
+
+import { getFirebaseAuthClient } from "./firebaseAuth";
 
 const DEFAULT_REVIEW_MESSAGE = 'Run "Review Organize Plan" to preview file moves before approval.';
 const DEFAULT_SCAN_SUMMARY = "Run a scan to load project insights.";
 const EMPTY_RESULT_TEXT = "Run a scan to preview grouped projects.";
-const DEFAULT_PAGE_SIZE = 50;
-const PAGE_SIZE_OPTIONS = [25, 50, 100, 200];
+const DEFAULT_PAGE_SIZE = 10;
+const PAGE_SIZE_OPTIONS = [10, 20, 30];
 const DIFF_SAMPLE_LIMIT = 12;
-const IMAGE_PREVIEW_LIMIT = 20;
+const IMAGE_PREVIEW_LIMIT = 6;
+const PROJECT_TABLE_LIMIT = 8;
 const THUMBNAIL_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff"]);
+const DOCK_ITEMS = ["Dashboard", "Personal", "Business", "Accounts", "Trending", "Settings", "Logout"];
+const AUTH_MODE_SIGN_IN = "sign-in";
+const AUTH_MODE_SIGN_UP = "sign-up";
 
 const initialState = {
   selectedFolder: "",
@@ -22,6 +36,7 @@ const initialState = {
   currentPage: 1,
   busyAction: null,
   backendHealth: "checking",
+  backendHealthInfo: null,
   scanResult: null,
   projectFilter: "",
   selectedProjectName: "",
@@ -39,6 +54,8 @@ function reducer(state, action) {
       return { ...state, busyAction: action.payload };
     case "SET_BACKEND_HEALTH":
       return { ...state, backendHealth: action.payload };
+    case "SET_BACKEND_HEALTH_INFO":
+      return { ...state, backendHealthInfo: action.payload };
     case "TOGGLE_RAW":
       return { ...state, showRawPayload: !state.showRawPayload };
     case "MARK_THUMBNAIL_FAILED":
@@ -228,6 +245,33 @@ function backendHealthLabel(health) {
   return "Checking";
 }
 
+function gpuHealthLabel(backendHealth, healthInfo) {
+  if (backendHealth === "checking") {
+    return "GPU: Checking";
+  }
+  if (backendHealth !== "healthy" || !healthInfo) {
+    return "GPU: Unknown";
+  }
+  if (healthInfo.gpu_active) {
+    return healthInfo.gpu_device ? `GPU: ${healthInfo.gpu_device}` : "GPU: Active";
+  }
+  return "GPU: CPU";
+}
+
+function gpuHealthClass(backendHealth, healthInfo) {
+  if (backendHealth !== "healthy" || !healthInfo) {
+    return "unknown";
+  }
+  return healthInfo.gpu_active ? "active" : "inactive";
+}
+
+function gpuToggleLabel(healthInfo) {
+  if (!healthInfo) {
+    return "GPU Toggle";
+  }
+  return healthInfo.gpu_enabled ? "GPU: On" : "GPU: Off";
+}
+
 function toFileUrl(sourcePath) {
   const normalized = sourcePath.replace(/\\/g, "/");
   const withRoot = /^[A-Za-z]:\//.test(normalized) ? `/${normalized}` : normalized;
@@ -242,8 +286,30 @@ function isThumbnailSupported(fileName) {
   return THUMBNAIL_EXTENSIONS.has(fileName.slice(index).toLowerCase());
 }
 
+function initialsFromName(name) {
+  const tokens = String(name || "")
+    .split(/[\s_-]+/)
+    .filter(Boolean);
+  if (tokens.length === 0) {
+    return "PR";
+  }
+  return tokens
+    .slice(0, 2)
+    .map((token) => token[0].toUpperCase())
+    .join("");
+}
+
 export function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
+  const [authMode, setAuthMode] = useState(AUTH_MODE_SIGN_IN);
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authReady, setAuthReady] = useState(false);
+  const [authUser, setAuthUser] = useState(null);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [firebaseAuth, setFirebaseAuth] = useState(null);
+  const [firebaseAuthError, setFirebaseAuthError] = useState("");
 
   const isBusy = state.busyAction !== null;
   const canReview = !isBusy && Boolean(state.selectedFolder);
@@ -272,6 +338,8 @@ export function App() {
     return filteredProjects.find((project) => project.name === state.selectedProjectName) || null;
   }, [filteredProjects, state.selectedProjectName]);
 
+  const visibleProjects = useMemo(() => filteredProjects.slice(0, PROJECT_TABLE_LIMIT), [filteredProjects]);
+
   useEffect(() => {
     if (filteredProjects.length === 0) {
       if (state.selectedProjectName) {
@@ -294,6 +362,12 @@ export function App() {
     }
 
     return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+  }, [scanProjects]);
+
+  const recentProjects = useMemo(() => {
+    return [...scanProjects]
+      .sort((a, b) => b.image_count - a.image_count)
+      .slice(0, 8);
   }, [scanProjects]);
 
   const filteredOperations = useMemo(() => {
@@ -329,17 +403,59 @@ export function App() {
   async function refreshBackendHealth(silent) {
     try {
       dispatch({ type: "SET_BACKEND_HEALTH", payload: "checking" });
+      dispatch({ type: "SET_BACKEND_HEALTH_INFO", payload: null });
       const api = requireAPI();
-      await api.checkBackendHealth();
+      const healthInfo = await api.checkBackendHealth();
       dispatch({ type: "SET_BACKEND_HEALTH", payload: "healthy" });
+      dispatch({ type: "SET_BACKEND_HEALTH_INFO", payload: healthInfo });
       if (!silent) {
-        setStatus("Backend is reachable.");
+        if (healthInfo.gpu_active) {
+          setStatus("Backend is reachable. GPU acceleration is active.");
+        } else if (healthInfo.gpu_available && !healthInfo.gpu_enabled) {
+          setStatus("Backend is reachable. GPU is available but disabled.");
+        } else {
+          setStatus("Backend is reachable. Using CPU.");
+        }
       }
     } catch (error) {
       dispatch({ type: "SET_BACKEND_HEALTH", payload: "unreachable" });
+      dispatch({ type: "SET_BACKEND_HEALTH_INFO", payload: null });
       if (!silent) {
         setStatus(error.message || "Backend is unreachable.");
       }
+    }
+  }
+
+  async function closeWindow() {
+    try {
+      const api = requireAPI();
+      await api.closeApp();
+    } catch (error) {
+      setStatus(error.message || "Unable to close app.");
+    }
+  }
+
+  async function toggleGpuAcceleration() {
+    try {
+      setBusy("gpu-toggle");
+      const api = requireAPI();
+      const currentEnabled = state.backendHealthInfo?.gpu_enabled ?? true;
+      const nextEnabled = !currentEnabled;
+      const runtime = await api.setGpuAcceleration(nextEnabled);
+      dispatch({ type: "SET_BACKEND_HEALTH", payload: "healthy" });
+      dispatch({ type: "SET_BACKEND_HEALTH_INFO", payload: runtime });
+
+      if (runtime.gpu_active) {
+        setStatus("GPU acceleration enabled.");
+      } else if (runtime.gpu_available && !runtime.gpu_enabled) {
+        setStatus("GPU acceleration disabled. Running on CPU.");
+      } else {
+        setStatus("GPU is unavailable. Running on CPU.");
+      }
+    } catch (error) {
+      setStatus(error.message || "Unable to toggle GPU acceleration.");
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -513,240 +629,482 @@ export function App() {
   const lines = diff ? diffLines(diff) : [];
   const hasMoves = state.displayedOperations.length > 0;
   const healthLabel = backendHealthLabel(state.backendHealth);
+  const gpuLabel = gpuHealthLabel(state.backendHealth, state.backendHealthInfo);
+  const gpuClass = gpuHealthClass(state.backendHealth, state.backendHealthInfo);
+  const gpuSummary = state.backendHealthInfo?.gpu_active ? "GPU active" : "CPU mode";
+  const gpuButtonLabel = gpuToggleLabel(state.backendHealthInfo);
+  const lastScanSummary = state.scanResult
+    ? `Last scan: ${state.scanResult.project_count} project(s) and ${state.scanResult.image_count} image(s).`
+    : "No scans yet. Run Scan Folder to populate this list.";
+  const authButtonLabel = authMode === AUTH_MODE_SIGN_IN ? "Sign In" : "Create Account";
+  const authSwitchLabel = authMode === AUTH_MODE_SIGN_IN ? "Create account" : "Use existing account";
+  const authShellStyle = useMemo(
+    () => ({ backgroundImage: `url("${new URL("./auth-background.png", window.location.href).toString()}")` }),
+    []
+  );
+
+  useEffect(() => {
+    const authClient = getFirebaseAuthClient();
+    if (!authClient.enabled || !authClient.auth) {
+      setFirebaseAuthError(authClient.error || "Firebase Auth is unavailable.");
+      setAuthReady(true);
+      return undefined;
+    }
+
+    setFirebaseAuth(authClient.auth);
+    const unsubscribe = onAuthStateChanged(authClient.auth, (user) => {
+      setAuthUser(user);
+      setAuthReady(true);
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  async function submitAuth(event) {
+    event.preventDefault();
+    if (!firebaseAuth) {
+      return;
+    }
+
+    const email = authEmail.trim();
+    if (!email || !authPassword) {
+      setAuthError("Enter email and password.");
+      return;
+    }
+
+    try {
+      setAuthBusy(true);
+      setAuthError("");
+      if (authMode === AUTH_MODE_SIGN_UP) {
+        await createUserWithEmailAndPassword(firebaseAuth, email, authPassword);
+      } else {
+        await signInWithEmailAndPassword(firebaseAuth, email, authPassword);
+      }
+    } catch (error) {
+      setAuthError(error.message || "Authentication failed.");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function signInWithGoogle() {
+    if (!firebaseAuth) {
+      return;
+    }
+
+    try {
+      setAuthBusy(true);
+      setAuthError("");
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: "select_account" });
+      await signInWithPopup(firebaseAuth, provider);
+    } catch (error) {
+      setAuthError(error.message || "Google sign-in failed.");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function logout() {
+    if (!firebaseAuth) {
+      return;
+    }
+
+    try {
+      setAuthBusy(true);
+      await firebaseSignOut(firebaseAuth);
+      setStatus("Signed out.");
+    } catch (error) {
+      setStatus(error.message || "Sign out failed.");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  if (!authReady) {
+    return (
+      <div className="app-frame">
+        <div className="app-shell auth-shell with-background" style={authShellStyle}>
+          <div className="auth-card">
+            <h2>FrameSort</h2>
+            <p className="auth-subtitle">Initializing authentication...</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (firebaseAuthError) {
+    return (
+      <div className="app-frame">
+        <div className="app-shell auth-shell with-background" style={authShellStyle}>
+          <div className="auth-card">
+            <h2>Firebase Auth Setup Required</h2>
+            <p className="auth-subtitle">{firebaseAuthError}</p>
+            <p className="auth-hint">Add your Firebase project values in `electron-app/renderer/src/firebaseConfig.js` and restart the app.</p>
+            <button className="window-close-button" onClick={closeWindow} aria-label="Close app">X</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!authUser) {
+    return (
+      <div className="app-frame">
+        <div className="app-shell auth-shell with-background" style={authShellStyle}>
+          <form className="auth-card auth-form" onSubmit={submitAuth}>
+            <h2>{authMode === AUTH_MODE_SIGN_IN ? "Login" : "Create Account"}</h2>
+            <p className="auth-subtitle">Login with email or continue with Google.</p>
+
+            <label className="auth-label" htmlFor="auth-email">Email</label>
+            <input
+              id="auth-email"
+              className="auth-input"
+              type="email"
+              value={authEmail}
+              onChange={(event) => setAuthEmail(event.target.value)}
+              autoComplete="email"
+              required
+            />
+
+            <label className="auth-label" htmlFor="auth-password">Password</label>
+            <input
+              id="auth-password"
+              className="auth-input"
+              type="password"
+              value={authPassword}
+              onChange={(event) => setAuthPassword(event.target.value)}
+              autoComplete={authMode === AUTH_MODE_SIGN_IN ? "current-password" : "new-password"}
+              required
+            />
+
+            {authError ? <div className="auth-error">{authError}</div> : null}
+
+            <div className="auth-actions">
+              <button type="submit" disabled={authBusy}>{authBusy ? "Please wait..." : authButtonLabel}</button>
+              <button
+                type="button"
+                className="auth-secondary"
+                onClick={() => {
+                  setAuthError("");
+                  setAuthMode(authMode === AUTH_MODE_SIGN_IN ? AUTH_MODE_SIGN_UP : AUTH_MODE_SIGN_IN);
+                }}
+                disabled={authBusy}
+              >
+                {authSwitchLabel}
+              </button>
+            </div>
+
+            <button type="button" className="auth-google-button" onClick={signInWithGoogle} disabled={authBusy}>
+              Continue with Google
+            </button>
+
+            <button type="button" className="window-close-button auth-close" onClick={closeWindow} aria-label="Close app">X</button>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <div>
-          <h1>FrameSort</h1>
-          <p className="subtitle">Review-first photo organization workflow</p>
-        </div>
+    <div className="app-frame">
+      <div className="app-shell">
+        <header className="topbar">
+          <div>
+            <h1>Good Evening! FrameSort</h1>
+            <p className="subtitle">AI-assisted photo organization dashboard</p>
+          </div>
         <div className="topbar-right">
+          <div className="auth-chip" title={authUser.email || "Authenticated user"}>{authUser.email || "Authenticated"}</div>
           <div className={`health-chip ${state.backendHealth}`}>Backend: {healthLabel}</div>
+          <div className={`gpu-chip ${gpuClass}`}>{gpuLabel}</div>
+          <button
+            className={`gpu-toggle-button ${state.backendHealthInfo?.gpu_enabled ? "on" : "off"}`}
+            onClick={toggleGpuAcceleration}
+            disabled={isBusy || state.backendHealth === "unreachable"}
+          >
+            {gpuButtonLabel}
+          </button>
+          <button className="auth-logout-button" onClick={logout} disabled={authBusy}>Logout</button>
           <button onClick={() => refreshBackendHealth(false)} disabled={isBusy}>Refresh Backend</button>
+          <button className="window-close-button" onClick={closeWindow} aria-label="Close app">X</button>
         </div>
       </header>
 
-      <div className="actions">
-        <button onClick={selectFolder} disabled={isBusy}>Select Folder</button>
-        <button onClick={scanFolder} disabled={!canScan}>Scan Folder</button>
-        <button onClick={reviewOrganizePlan} disabled={!canReview}>Review Organize Plan</button>
-      </div>
-
-      <div id="folder" className="folder-path">{state.selectedFolder || "No folder selected."}</div>
-      <div id="status" className="status-line">{state.statusMessage}</div>
-
-      <section className="panel" id="scan-panel">
-        <h2>Scan Insights</h2>
-        <div className="scan-summary">
-          {state.scanResult
-            ? `Last scan: ${state.scanResult.project_count} project(s), ${state.scanResult.image_count} image(s).`
-            : DEFAULT_SCAN_SUMMARY}
+        <div className="actions">
+          <button onClick={selectFolder} disabled={isBusy}>Select Folder</button>
+          <button onClick={scanFolder} disabled={!canScan}>Scan Folder</button>
+          <button onClick={reviewOrganizePlan} disabled={!canReview}>Review Organize Plan</button>
         </div>
 
-        {state.scanResult ? (
-          <>
-            <div className="kpi-grid">
-              <article className="kpi-card">
-                <div className="kpi-label">Projects</div>
-                <div className="kpi-value">{state.scanResult.project_count}</div>
-              </article>
-              <article className="kpi-card">
-                <div className="kpi-label">Images</div>
-                <div className="kpi-value">{state.scanResult.image_count}</div>
-              </article>
-              <article className="kpi-card">
-                <div className="kpi-label">Categories</div>
-                <div className="kpi-value">{categorySummary.length}</div>
-              </article>
-            </div>
+        <div className="path-status-wrap">
+          <div id="folder" className="folder-path">{state.selectedFolder || "No folder selected."}</div>
+          <div id="status" className="status-line">{state.statusMessage}</div>
+        </div>
 
-            {categorySummary.length > 0 ? (
-              <div className="category-row">
-                {categorySummary.map(([category, count]) => (
-                  <span key={category} className="category-pill">{category}: {count}</span>
-                ))}
+        <div className="dashboard-main">
+          <div className="dashboard-left">
+            <section className="panel" id="scan-panel">
+              <h2>Scan Insights</h2>
+              <div className="scan-summary">
+                {state.scanResult
+                  ? `Last scan: ${state.scanResult.project_count} project(s), ${state.scanResult.image_count} image(s).`
+                  : DEFAULT_SCAN_SUMMARY}
               </div>
-            ) : null}
 
-            <div className="table-tools">
-              <input
-                placeholder="Filter projects by name, category, or date"
-                value={state.projectFilter}
-                onChange={onProjectFilterChanged}
-                disabled={scanProjects.length === 0}
-              />
-            </div>
+              {state.scanResult ? (
+                <>
+                  <div className="kpi-grid">
+                    <article className="kpi-card">
+                      <div className="kpi-label">Projects</div>
+                      <div className="kpi-value">{state.scanResult.project_count}</div>
+                    </article>
+                    <article className="kpi-card">
+                      <div className="kpi-label">Images</div>
+                      <div className="kpi-value">{state.scanResult.image_count}</div>
+                    </article>
+                    <article className="kpi-card">
+                      <div className="kpi-label">Categories</div>
+                      <div className="kpi-value">{categorySummary.length}</div>
+                    </article>
+                  </div>
 
-            {filteredProjects.length === 0 ? (
-              <div className="note">No projects match the current filter.</div>
-            ) : (
-              <div className="project-layout">
-                <div className="move-table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Project</th>
-                        <th>Category</th>
-                        <th>Date</th>
-                        <th>Images</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredProjects.map((project) => (
-                        <tr
-                          key={project.name}
-                          className={project.name === state.selectedProjectName ? "row-selected" : ""}
-                          onClick={() => dispatch({ type: "SELECT_PROJECT", payload: project.name })}
-                        >
-                          <td>{project.name}</td>
-                          <td>{project.category}</td>
-                          <td>{project.capture_date}</td>
-                          <td>{project.image_count}</td>
-                        </tr>
+                  {categorySummary.length > 0 ? (
+                    <div className="category-row">
+                      {categorySummary.map(([category, count]) => (
+                        <span key={category} className="category-pill">{category}: {count}</span>
                       ))}
-                    </tbody>
-                  </table>
-                </div>
+                    </div>
+                  ) : null}
 
-                <aside className="project-detail">
-                  <h3>Project Detail</h3>
-                  {selectedProject ? (
-                    <>
-                      <div className="detail-meta">{selectedProject.name}</div>
-                      <div className="detail-meta">Category: {selectedProject.category}</div>
-                      <div className="detail-meta">Capture Date: {selectedProject.capture_date}</div>
-                      <div className="detail-meta">Images: {selectedProject.image_count}</div>
+                  <div className="table-tools">
+                    <input
+                      placeholder="Filter projects by name, category, or date"
+                      value={state.projectFilter}
+                      onChange={onProjectFilterChanged}
+                      disabled={scanProjects.length === 0}
+                    />
+                  </div>
 
-                      <div className="thumbnail-grid">
-                        {selectedProject.images.slice(0, IMAGE_PREVIEW_LIMIT).map((image, index) => {
-                          const isSupported = isThumbnailSupported(image.file_name);
-                          const isFailed = Boolean(state.thumbnailFailures[image.source_path]);
-                          const extensionIndex = image.file_name.lastIndexOf(".");
-                          const extension = extensionIndex >= 0 ? image.file_name.slice(extensionIndex + 1).toUpperCase() : "FILE";
-
-                          return (
-                            <article className="thumbnail-card" key={`${selectedProject.name}:${image.source_path}:${index}`}>
-                              <div className="thumbnail-frame">
-                                {isSupported && !isFailed ? (
-                                  <img
-                                    src={toFileUrl(image.source_path)}
-                                    alt={image.file_name}
-                                    loading="lazy"
-                                    onError={() => {
-                                      if (!state.thumbnailFailures[image.source_path]) {
-                                        dispatch({ type: "MARK_THUMBNAIL_FAILED", payload: image.source_path });
-                                      }
-                                    }}
-                                  />
-                                ) : (
-                                  <div className="thumbnail-fallback">
-                                    {isSupported ? "Preview failed" : `${extension} preview unavailable`}
-                                  </div>
-                                )}
-                              </div>
-                              <div className="thumb-name" title={image.file_name}>{image.file_name}</div>
-                              <div className="thumb-sub">{image.category} | {image.capture_date}</div>
-                            </article>
-                          );
-                        })}
+                  {filteredProjects.length === 0 ? (
+                    <div className="note">No projects match the current filter.</div>
+                  ) : (
+                    <div className="project-layout">
+                      <div className="move-table-wrap">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Project</th>
+                              <th>Category</th>
+                              <th>Date</th>
+                              <th>Images</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {visibleProjects.map((project) => (
+                              <tr
+                                key={project.name}
+                                className={project.name === state.selectedProjectName ? "row-selected" : ""}
+                                onClick={() => dispatch({ type: "SELECT_PROJECT", payload: project.name })}
+                              >
+                                <td>{project.name}</td>
+                                <td>{project.category}</td>
+                                <td>{project.capture_date}</td>
+                                <td>{project.image_count}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        {filteredProjects.length > PROJECT_TABLE_LIMIT ? (
+                          <div className="note table-cap-note">
+                            Showing first {PROJECT_TABLE_LIMIT} project(s) to keep the dashboard fixed-size.
+                          </div>
+                        ) : null}
                       </div>
 
-                      {selectedProject.images.length > IMAGE_PREVIEW_LIMIT ? (
-                        <div className="note">Showing first {IMAGE_PREVIEW_LIMIT} image(s) from this project.</div>
-                      ) : null}
-                    </>
-                  ) : (
-                    <div className="note">Select a project to inspect image details.</div>
+                      <aside className="project-detail">
+                        <h3>Project Detail</h3>
+                        {selectedProject ? (
+                          <>
+                            <div className="detail-meta">{selectedProject.name}</div>
+                            <div className="detail-meta">Category: {selectedProject.category}</div>
+                            <div className="detail-meta">Capture Date: {selectedProject.capture_date}</div>
+                            <div className="detail-meta">Images: {selectedProject.image_count}</div>
+
+                            <div className="thumbnail-grid">
+                              {selectedProject.images.slice(0, IMAGE_PREVIEW_LIMIT).map((image, index) => {
+                                const isSupported = isThumbnailSupported(image.file_name);
+                                const isFailed = Boolean(state.thumbnailFailures[image.source_path]);
+                                const extensionIndex = image.file_name.lastIndexOf(".");
+                                const extension = extensionIndex >= 0 ? image.file_name.slice(extensionIndex + 1).toUpperCase() : "FILE";
+
+                                return (
+                                  <article className="thumbnail-card" key={`${selectedProject.name}:${image.source_path}:${index}`}>
+                                    <div className="thumbnail-frame">
+                                      {isSupported && !isFailed ? (
+                                        <img
+                                          src={toFileUrl(image.source_path)}
+                                          alt={image.file_name}
+                                          loading="lazy"
+                                          onError={() => {
+                                            if (!state.thumbnailFailures[image.source_path]) {
+                                              dispatch({ type: "MARK_THUMBNAIL_FAILED", payload: image.source_path });
+                                            }
+                                          }}
+                                        />
+                                      ) : (
+                                        <div className="thumbnail-fallback">
+                                          {isSupported ? "Preview failed" : `${extension} preview unavailable`}
+                                        </div>
+                                      )}
+                                    </div>
+                                    <div className="thumb-name" title={image.file_name}>{image.file_name}</div>
+                                    <div className="thumb-sub">{image.category} | {image.capture_date}</div>
+                                  </article>
+                                );
+                              })}
+                            </div>
+
+                            {selectedProject.images.length > IMAGE_PREVIEW_LIMIT ? (
+                              <div className="note">Showing first {IMAGE_PREVIEW_LIMIT} image(s) from this project.</div>
+                            ) : null}
+                          </>
+                        ) : (
+                          <div className="note">Select a project to inspect image details.</div>
+                        )}
+                      </aside>
+                    </div>
                   )}
-                </aside>
+                </>
+              ) : null}
+            </section>
+
+            <section id="review-panel" className="panel">
+              <h2>Review Plan</h2>
+              <div id="review-summary">{state.reviewSummary}</div>
+
+              <div className="review-actions">
+                <button id="approve-button" onClick={approvePlan} disabled={!canApprove}>Approve Plan & Organize</button>
+                <button id="discard-button" onClick={discardPlan} disabled={!canDiscard}>Discard Plan</button>
               </div>
-            )}
-          </>
-        ) : null}
-      </section>
 
-      <section id="review-panel" className="panel">
-        <h2>Review Plan</h2>
-        <div id="review-summary">{state.reviewSummary}</div>
+              <div className="table-tools">
+                <input
+                  id="move-filter"
+                  placeholder="Filter source, target, or status"
+                  value={state.moveFilter}
+                  onChange={onFilterChanged}
+                  disabled={!hasMoves}
+                />
+                <label>
+                  Rows:
+                  <select id="page-size" value={state.pageSize} onChange={onPageSizeChanged} disabled={!hasMoves}>
+                    {PAGE_SIZE_OPTIONS.map((size) => (
+                      <option key={size} value={size}>{size}</option>
+                    ))}
+                  </select>
+                </label>
+                <button id="prev-page" onClick={goToPrevPage} disabled={!hasMoves || currentPage <= 1}>Prev</button>
+                <button id="next-page" onClick={goToNextPage} disabled={!hasMoves || currentPage >= totalPages}>Next</button>
+                <span id="page-info" className="page-info">Page {currentPage}/{totalPages}</span>
+              </div>
 
-        <div className="review-actions">
-          <button id="approve-button" onClick={approvePlan} disabled={!canApprove}>Approve Plan & Organize</button>
-          <button id="discard-button" onClick={discardPlan} disabled={!canDiscard}>Discard Plan</button>
-        </div>
+              {diff ? (
+                <div id="plan-diff-warning">
+                  <div className="diff-title">Plan drift detected before approval</div>
+                  <div className="diff-summary">
+                    Added: {diff.added.length} | Removed: {diff.removed.length} | Re-targeted: {diff.retargeted.length}
+                  </div>
+                  <div className="diff-lines">{lines.join("\n")}</div>
+                </div>
+              ) : null}
 
-        <div className="table-tools">
-          <input
-            id="move-filter"
-            placeholder="Filter source, target, or status"
-            value={state.moveFilter}
-            onChange={onFilterChanged}
-            disabled={!hasMoves}
-          />
-          <label>
-            Rows:
-            <select id="page-size" value={state.pageSize} onChange={onPageSizeChanged} disabled={!hasMoves}>
-              {PAGE_SIZE_OPTIONS.map((size) => (
-                <option key={size} value={size}>{size}</option>
-              ))}
-            </select>
-          </label>
-          <button id="prev-page" onClick={goToPrevPage} disabled={!hasMoves || currentPage <= 1}>Prev</button>
-          <button id="next-page" onClick={goToNextPage} disabled={!hasMoves || currentPage >= totalPages}>Next</button>
-          <span id="page-info" className="page-info">Page {currentPage}/{totalPages}</span>
-        </div>
+              {!hasMoves ? (
+                <div className="note">No file moves are needed.</div>
+              ) : (
+                <>
+                  <div className="move-table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>#</th>
+                          <th>Status</th>
+                          <th>Source</th>
+                          <th>Target</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pageRows.map((move, index) => (
+                          <tr key={`${move.source_path}:${move.target_path}:${index}`}>
+                            <td>{start + index + 1}</td>
+                            <td>{move.status}</td>
+                            <td>{move.source_path}</td>
+                            <td>{move.target_path}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="note">
+                    Showing {pageRows.length} of {filteredOperations.length} filtered move(s), {state.displayedOperations.length} total.
+                  </div>
+                </>
+              )}
+            </section>
 
-        {diff ? (
-          <div id="plan-diff-warning">
-            <div className="diff-title">Plan drift detected before approval</div>
-            <div className="diff-summary">
-              Added: {diff.added.length} | Removed: {diff.removed.length} | Re-targeted: {diff.retargeted.length}
-            </div>
-            <div className="diff-lines">{lines.join("\n")}</div>
+            <section className="panel raw-panel">
+              <div className="raw-header">
+                <h2>Raw Payload</h2>
+                <button onClick={toggleRawPayload}>{state.showRawPayload ? "Hide" : "Show"} JSON</button>
+              </div>
+
+              {state.showRawPayload ? <pre>{state.resultText}</pre> : <div className="note">Raw payload is hidden.</div>}
+            </section>
           </div>
-        ) : null}
 
-        {!hasMoves ? (
-          <div className="note">No file moves are needed.</div>
-        ) : (
-          <>
-            <div className="move-table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>Status</th>
-                    <th>Source</th>
-                    <th>Target</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {pageRows.map((move, index) => (
-                    <tr key={`${move.source_path}:${move.target_path}:${index}`}>
-                      <td>{start + index + 1}</td>
-                      <td>{move.status}</td>
-                      <td>{move.source_path}</td>
-                      <td>{move.target_path}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          <aside className="panel contacts-panel">
+            <div className="contacts-head">
+              <h2>Projects</h2>
+              <button className="icon-button" onClick={() => refreshBackendHealth(false)} disabled={isBusy}>?</button>
             </div>
-            <div className="note">
-              Showing {pageRows.length} of {filteredOperations.length} filtered move(s), {state.displayedOperations.length} total.
+            <div className="contacts-summary">{lastScanSummary}</div>
+            <div className="contacts-list">
+              {recentProjects.length === 0 ? (
+                <div className="note">Run a scan to populate project contacts.</div>
+              ) : (
+                recentProjects.map((project) => (
+                  <button
+                    key={`contact:${project.name}`}
+                    className={`contact-row ${project.name === state.selectedProjectName ? "selected" : ""}`}
+                    onClick={() => dispatch({ type: "SELECT_PROJECT", payload: project.name })}
+                  >
+                    <span className="contact-avatar">{initialsFromName(project.name)}</span>
+                    <span className="contact-meta">
+                      <span className="contact-name">{project.name}</span>
+                      <span className="contact-sub">{project.category} | {project.image_count} image(s)</span>
+                    </span>
+                  </button>
+                ))
+              )}
             </div>
-          </>
-        )}
-      </section>
-
-      <section className="panel">
-        <div className="raw-header">
-          <h2>Raw Payload</h2>
-          <button onClick={toggleRawPayload}>{state.showRawPayload ? "Hide" : "Show"} JSON</button>
+            <div className="callout-card">
+              <div className="callout-title">Performance</div>
+              <div className="callout-copy">
+                {gpuSummary}. Use "Review Organize Plan" before moving files.
+              </div>
+            </div>
+          </aside>
         </div>
 
-        {state.showRawPayload ? <pre>{state.resultText}</pre> : <div className="note">Raw payload is hidden.</div>}
-      </section>
+        <footer className="bottom-dock">
+          {DOCK_ITEMS.map((item, index) => (
+            <button key={item} className={`dock-item ${index === 0 ? "active" : ""}`}>{item}</button>
+          ))}
+        </footer>
+      </div>
     </div>
   );
 }

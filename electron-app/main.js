@@ -7,10 +7,46 @@ const BACKEND_URL = "http://127.0.0.1:8765";
 let mainWindow;
 let backendProcess;
 
+function safeWrite(stream, message) {
+  if (!stream || !stream.writable || stream.destroyed) {
+    return;
+  }
+
+  try {
+    stream.write(`${message}\n`);
+  } catch (error) {
+    if (error && error.code !== "EPIPE") {
+      // Ignore logging failures so app flow is not interrupted.
+    }
+  }
+}
+
+function logInfo(message) {
+  safeWrite(process.stdout, message);
+}
+
+function logError(message) {
+  safeWrite(process.stderr, message);
+}
+
 function createWindow() {
+  const WINDOW_WIDTH = 1520;
+  const WINDOW_HEIGHT = 980;
+
   mainWindow = new BrowserWindow({
-    width: 900,
-    height: 680,
+    width: WINDOW_WIDTH,
+    height: WINDOW_HEIGHT,
+    minWidth: WINDOW_WIDTH,
+    maxWidth: WINDOW_WIDTH,
+    minHeight: WINDOW_HEIGHT,
+    maxHeight: WINDOW_HEIGHT,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    frame: false,
+    transparent: true,
+    backgroundColor: "#00000000",
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
     },
@@ -56,6 +92,21 @@ async function requestBackend(route, folderPath) {
   return body;
 }
 
+async function requestBackendJson(route, payload) {
+  const response = await fetch(`${BACKEND_URL}${route}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(body.detail || "Backend request failed.");
+  }
+
+  return body;
+}
+
 async function requestBackendHealth() {
   const response = await fetch(`${BACKEND_URL}/health`);
   const body = await response.json();
@@ -77,12 +128,15 @@ function startBackend() {
   });
 
   backendProcess.stderr.on("data", (data) => {
-    console.error("[backend]", data.toString());
+    const lines = data.toString().split(/\r?\n/).filter(Boolean);
+    for (const line of lines) {
+      logError(`[backend] ${line}`);
+    }
   });
 
   backendProcess.on("exit", (code) => {
     backendProcess = null;
-    console.log(`Backend exited with code ${code}`);
+    logInfo(`Backend exited with code ${code}`);
   });
 }
 
@@ -98,7 +152,7 @@ app.whenReady().then(async () => {
   try {
     await waitForBackend();
   } catch (error) {
-    console.error(error.message);
+    logError(error.message);
   }
   createWindow();
 });
@@ -128,4 +182,15 @@ ipcMain.handle("organize-folder-dry-run", async (_event, folderPath) => {
 
 ipcMain.handle("backend-health", async () => {
   return requestBackendHealth();
+});
+
+ipcMain.handle("gpu-acceleration-set", async (_event, enabled) => {
+  return requestBackendJson("/runtime/gpu", { enabled: Boolean(enabled) });
+});
+
+ipcMain.handle("window-close", async (event) => {
+  const currentWindow = BrowserWindow.fromWebContents(event.sender);
+  if (currentWindow) {
+    currentWindow.close();
+  }
 });

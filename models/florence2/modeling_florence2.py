@@ -1788,7 +1788,16 @@ class Florence2Decoder(Florence2LanguagePreTrainedModel):
             raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
 
         # past_key_values_length
-        past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
+        if past_key_values is not None:
+            past_key_values_length = 0
+            try:
+                first_layer = past_key_values[0] if len(past_key_values) > 0 else None
+                if isinstance(first_layer, (tuple, list)) and len(first_layer) > 0 and first_layer[0] is not None:
+                    past_key_values_length = first_layer[0].shape[2]
+            except Exception:
+                past_key_values_length = 0
+        else:
+            past_key_values_length = 0
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input)
@@ -2194,16 +2203,24 @@ class Florence2LanguageForConditionalGeneration(Florence2LanguagePreTrainedModel
     ):
         # cut decoder_input_ids if past_key_values is used
         if past_key_values is not None:
-            past_length = past_key_values[0][0].shape[2]
+            past_length = None
+            try:
+                first_layer = past_key_values[0] if len(past_key_values) > 0 else None
+                if isinstance(first_layer, (tuple, list)) and len(first_layer) > 0 and first_layer[0] is not None:
+                    past_length = first_layer[0].shape[2]
+            except Exception:
+                past_length = None
 
-            # Some generation methods already pass only the last input ID
-            if decoder_input_ids.shape[1] > past_length:
+            # Transformers generation internals may pass partially initialized caches.
+            if past_length is None:
+                remove_prefix_length = max(decoder_input_ids.shape[1] - 1, 0)
+            elif decoder_input_ids.shape[1] > past_length:
                 remove_prefix_length = past_length
             else:
-                # Default to old behavior: keep only final ID
                 remove_prefix_length = decoder_input_ids.shape[1] - 1
 
-            decoder_input_ids = decoder_input_ids[:, remove_prefix_length:]
+            if remove_prefix_length > 0:
+                decoder_input_ids = decoder_input_ids[:, remove_prefix_length:]
 
         return {
             "input_ids": None,  # encoder_outputs is defined. input_ids not needed
@@ -2337,7 +2354,10 @@ class Florence2PreTrainedModel(PreTrainedModel):
         Retrieve language_model's attribute to check whether the model supports
         Flash Attention 2 or not.
         """
-        return self.language_model._supports_flash_attn_2
+        language_model = getattr(self, "language_model", None)
+        if language_model is None:
+            return False
+        return getattr(language_model, "_supports_flash_attn_2", False)
 
     @property
     def _supports_sdpa(self):
@@ -2345,7 +2365,10 @@ class Florence2PreTrainedModel(PreTrainedModel):
         Retrieve language_model's attribute to check whether the model supports
         SDPA or not.
         """
-        return self.language_model._supports_sdpa
+        language_model = getattr(self, "language_model", None)
+        if language_model is None:
+            return False
+        return getattr(language_model, "_supports_sdpa", False)
 
 
 FLORENCE2_INPUTS_DOCSTRING = r"""
@@ -2814,16 +2837,23 @@ class Florence2ForConditionalGeneration(Florence2PreTrainedModel):
     ):
         # cut decoder_input_ids if past_key_values is used
         if past_key_values is not None:
-            past_length = past_key_values[0][0].shape[2]
+            past_length = None
+            try:
+                first_layer = past_key_values[0] if len(past_key_values) > 0 else None
+                if isinstance(first_layer, (tuple, list)) and len(first_layer) > 0 and first_layer[0] is not None:
+                    past_length = first_layer[0].shape[2]
+            except Exception:
+                past_length = None
 
-            # Some generation methods already pass only the last input ID
-            if decoder_input_ids.shape[1] > past_length:
+            if past_length is None:
+                remove_prefix_length = max(decoder_input_ids.shape[1] - 1, 0)
+            elif decoder_input_ids.shape[1] > past_length:
                 remove_prefix_length = past_length
             else:
-                # Default to old behavior: keep only final ID
                 remove_prefix_length = decoder_input_ids.shape[1] - 1
 
-            decoder_input_ids = decoder_input_ids[:, remove_prefix_length:]
+            if remove_prefix_length > 0:
+                decoder_input_ids = decoder_input_ids[:, remove_prefix_length:]
         
         return {
             "input_ids": None,  # encoder_outputs is defined. input_ids not needed

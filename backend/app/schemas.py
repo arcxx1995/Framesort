@@ -43,3 +43,15 @@ class OrganizeResponse(BaseModel):
     project_count: int
     dry_run: bool
     operations: List[MoveOperation]
+
+
+class GpuToggleRequest(BaseModel):
+    enabled: bool
+
+
+class RuntimeStatusResponse(BaseModel):
+    status: str = "ok"
+    gpu_available: bool
+    gpu_enabled: bool
+    gpu_active: bool
+    gpu_device: str | None = None

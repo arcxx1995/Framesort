@@ -5,11 +5,14 @@ from fastapi import FastAPI, HTTPException
 from backend.app.db import initialize_db, save_run
 from backend.app.models import MoveRecord, ProjectRecord
 from backend.app.pipeline import build_projects, organize_projects
+from backend.app.services.analysis import get_runtime_device_status, set_gpu_acceleration_enabled
 from backend.app.schemas import (
     AnalyzeImage,
+    GpuToggleRequest,
     MoveOperation,
     OrganizeResponse,
     ProjectPreview,
+    RuntimeStatusResponse,
     ScanRequest,
     ScanResponse,
 )
@@ -23,8 +26,15 @@ def startup() -> None:
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> RuntimeStatusResponse:
+    runtime = get_runtime_device_status()
+    return RuntimeStatusResponse(status="ok", **runtime)
+
+
+@app.post("/runtime/gpu", response_model=RuntimeStatusResponse)
+def set_runtime_gpu(payload: GpuToggleRequest) -> RuntimeStatusResponse:
+    runtime = set_gpu_acceleration_enabled(payload.enabled)
+    return RuntimeStatusResponse(status="ok", **runtime)
 
 
 def _project_preview(project: ProjectRecord) -> ProjectPreview:

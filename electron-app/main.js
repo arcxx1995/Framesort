@@ -112,3 +112,7 @@ ipcMain.handle("scan-folder", async (_event, folderPath) => {
 ipcMain.handle("organize-folder", async (_event, folderPath) => {
   return requestBackend("/organize", folderPath);
 });
+
+ipcMain.handle("organize-folder-dry-run", async (_event, folderPath) => {
+  return requestBackend("/organize/dry-run", folderPath);
+});

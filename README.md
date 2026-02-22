@@ -382,10 +382,11 @@ Electron + React + Node.js + Python + OpenClaw
 
 Implemented now:
 
-- Electron desktop UI with folder picker, Scan, and Organize actions
+- Electron desktop UI with folder picker, Scan, and a Review Plan screen with explicit approve-before-organize, pre-approval plan-drift warning, and paged/filterable move review
 - FastAPI backend (`backend.app.main`) with:
   - `GET /health`
   - `POST /scan`
+  - `POST /organize/dry-run`
   - `POST /organize`
 - Local pipeline services for:
   - recursive image scanning

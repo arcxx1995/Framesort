@@ -1,50 +1,13 @@
-<!DOCTYPE html>
-<html>
+﻿<!DOCTYPE html>
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Photo Organizer</title>
-  <style>
-    body {
-      font-family: "Segoe UI", Arial, sans-serif;
-      margin: 24px;
-      max-width: 900px;
-    }
-    .actions {
-      display: flex;
-      gap: 12px;
-      margin-bottom: 16px;
-    }
-    button {
-      padding: 8px 14px;
-      cursor: pointer;
-    }
-    #folder {
-      font-family: Consolas, monospace;
-      margin-bottom: 12px;
-    }
-    #status {
-      margin-bottom: 12px;
-      color: #0b4f71;
-    }
-    pre {
-      background: #f6f7f9;
-      border: 1px solid #d8dde6;
-      border-radius: 6px;
-      padding: 12px;
-      white-space: pre-wrap;
-    }
-  </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FrameSort</title>
+  <link rel="stylesheet" href="./dist/app.css" />
 </head>
 <body>
-  <h1>FrameSort</h1>
-  <div class="actions">
-    <button onclick="selectFolder()">Select Folder</button>
-    <button onclick="scanFolder()">Scan Folder</button>
-    <button onclick="organizeFolder()">Organize Images</button>
-  </div>
-  <div id="folder">No folder selected.</div>
-  <div id="status"></div>
-  <pre id="result">Run a scan to preview grouped projects.</pre>
-  <script src="renderer.js"></script>
+  <div id="root"></div>
+  <script src="./dist/app.js"></script>
 </body>
 </html>

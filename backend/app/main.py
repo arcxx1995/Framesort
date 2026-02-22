@@ -9,9 +9,9 @@ from backend.app.schemas import (
     AnalyzeImage,
     MoveOperation,
     OrganizeResponse,
+    ProjectPreview,
     ScanRequest,
     ScanResponse,
-    ProjectPreview,
 )
 
 app = FastAPI(title="FrameSort Backend", version="0.1.0")
@@ -53,6 +53,16 @@ def _move_preview(move: MoveRecord) -> MoveOperation:
     )
 
 
+def _organize_response(folder_path: str, projects: list[ProjectRecord], moves: list[MoveRecord], dry_run: bool) -> OrganizeResponse:
+    return OrganizeResponse(
+        folder_path=folder_path,
+        image_count=sum(len(project.images) for project in projects),
+        project_count=len(projects),
+        dry_run=dry_run,
+        operations=[_move_preview(move) for move in moves],
+    )
+
+
 @app.post("/scan", response_model=ScanResponse)
 def scan(payload: ScanRequest) -> ScanResponse:
     try:
@@ -81,10 +91,17 @@ def organize(payload: ScanRequest) -> OrganizeResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     save_run(payload.folder_path, mode="organize", projects=projects, moves=moves)
-    return OrganizeResponse(
-        folder_path=payload.folder_path,
-        image_count=sum(len(project.images) for project in projects),
-        project_count=len(projects),
-        operations=[_move_preview(move) for move in moves],
-    )
+    return _organize_response(payload.folder_path, projects, moves, dry_run=False)
 
+
+@app.post("/organize/dry-run", response_model=OrganizeResponse)
+def organize_dry_run(payload: ScanRequest) -> OrganizeResponse:
+    try:
+        projects, moves = organize_projects(payload.folder_path, dry_run=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    save_run(payload.folder_path, mode="organize_dry_run", projects=projects, moves=moves)
+    return _organize_response(payload.folder_path, projects, moves, dry_run=True)

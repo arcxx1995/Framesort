@@ -41,5 +41,5 @@ class OrganizeResponse(BaseModel):
     folder_path: str
     image_count: int
     project_count: int
+    dry_run: bool
     operations: List[MoveOperation]
-

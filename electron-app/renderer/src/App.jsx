@@ -7,6 +7,7 @@ const DEFAULT_PAGE_SIZE = 50;
 const PAGE_SIZE_OPTIONS = [25, 50, 100, 200];
 const DIFF_SAMPLE_LIMIT = 12;
 const IMAGE_PREVIEW_LIMIT = 20;
+const THUMBNAIL_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff"]);
 
 const initialState = {
   selectedFolder: "",
@@ -25,6 +26,7 @@ const initialState = {
   projectFilter: "",
   selectedProjectName: "",
   showRawPayload: false,
+  thumbnailFailures: {},
 };
 
 function reducer(state, action) {
@@ -39,6 +41,14 @@ function reducer(state, action) {
       return { ...state, backendHealth: action.payload };
     case "TOGGLE_RAW":
       return { ...state, showRawPayload: !state.showRawPayload };
+    case "MARK_THUMBNAIL_FAILED":
+      return {
+        ...state,
+        thumbnailFailures: {
+          ...state.thumbnailFailures,
+          [action.payload]: true,
+        },
+      };
     case "SELECT_FOLDER":
       return {
         ...state,
@@ -53,6 +63,7 @@ function reducer(state, action) {
         scanResult: null,
         projectFilter: "",
         selectedProjectName: "",
+        thumbnailFailures: {},
       };
     case "LOAD_SCAN":
       return {
@@ -67,6 +78,7 @@ function reducer(state, action) {
         currentPage: 1,
         projectFilter: "",
         selectedProjectName: action.payload.projects.length > 0 ? action.payload.projects[0].name : "",
+        thumbnailFailures: {},
       };
     case "LOAD_PLAN":
       return {
@@ -214,6 +226,20 @@ function backendHealthLabel(health) {
     return "Unreachable";
   }
   return "Checking";
+}
+
+function toFileUrl(sourcePath) {
+  const normalized = sourcePath.replace(/\\/g, "/");
+  const withRoot = /^[A-Za-z]:\//.test(normalized) ? `/${normalized}` : normalized;
+  return encodeURI(`file://${withRoot}`);
+}
+
+function isThumbnailSupported(fileName) {
+  const index = fileName.lastIndexOf(".");
+  if (index < 0) {
+    return false;
+  }
+  return THUMBNAIL_EXTENSIONS.has(fileName.slice(index).toLowerCase());
 }
 
 export function App() {
@@ -592,27 +618,38 @@ export function App() {
                       <div className="detail-meta">Capture Date: {selectedProject.capture_date}</div>
                       <div className="detail-meta">Images: {selectedProject.image_count}</div>
 
-                      <div className="move-table-wrap">
-                        <table>
-                          <thead>
-                            <tr>
-                              <th>#</th>
-                              <th>File</th>
-                              <th>Category</th>
-                              <th>Source</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {selectedProject.images.slice(0, IMAGE_PREVIEW_LIMIT).map((image, index) => (
-                              <tr key={`${selectedProject.name}:${image.source_path}:${index}`}>
-                                <td>{index + 1}</td>
-                                <td>{image.file_name}</td>
-                                <td>{image.category}</td>
-                                <td>{image.source_path}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                      <div className="thumbnail-grid">
+                        {selectedProject.images.slice(0, IMAGE_PREVIEW_LIMIT).map((image, index) => {
+                          const isSupported = isThumbnailSupported(image.file_name);
+                          const isFailed = Boolean(state.thumbnailFailures[image.source_path]);
+                          const extensionIndex = image.file_name.lastIndexOf(".");
+                          const extension = extensionIndex >= 0 ? image.file_name.slice(extensionIndex + 1).toUpperCase() : "FILE";
+
+                          return (
+                            <article className="thumbnail-card" key={`${selectedProject.name}:${image.source_path}:${index}`}>
+                              <div className="thumbnail-frame">
+                                {isSupported && !isFailed ? (
+                                  <img
+                                    src={toFileUrl(image.source_path)}
+                                    alt={image.file_name}
+                                    loading="lazy"
+                                    onError={() => {
+                                      if (!state.thumbnailFailures[image.source_path]) {
+                                        dispatch({ type: "MARK_THUMBNAIL_FAILED", payload: image.source_path });
+                                      }
+                                    }}
+                                  />
+                                ) : (
+                                  <div className="thumbnail-fallback">
+                                    {isSupported ? "Preview failed" : `${extension} preview unavailable`}
+                                  </div>
+                                )}
+                              </div>
+                              <div className="thumb-name" title={image.file_name}>{image.file_name}</div>
+                              <div className="thumb-sub">{image.category} | {image.capture_date}</div>
+                            </article>
+                          );
+                        })}
                       </div>
 
                       {selectedProject.images.length > IMAGE_PREVIEW_LIMIT ? (

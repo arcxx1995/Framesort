@@ -56,6 +56,15 @@ async function requestBackend(route, folderPath) {
   return body;
 }
 
+async function requestBackendHealth() {
+  const response = await fetch(`${BACKEND_URL}/health`);
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(body.detail || "Backend health request failed.");
+  }
+  return body;
+}
+
 function startBackend() {
   if (backendProcess) {
     return;
@@ -115,4 +124,8 @@ ipcMain.handle("organize-folder", async (_event, folderPath) => {
 
 ipcMain.handle("organize-folder-dry-run", async (_event, folderPath) => {
   return requestBackend("/organize/dry-run", folderPath);
+});
+
+ipcMain.handle("backend-health", async () => {
+  return requestBackendHealth();
 });

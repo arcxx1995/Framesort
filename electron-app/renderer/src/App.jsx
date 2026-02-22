@@ -1,10 +1,12 @@
-import React, { useMemo, useReducer } from "react";
+import React, { useEffect, useMemo, useReducer } from "react";
 
 const DEFAULT_REVIEW_MESSAGE = 'Run "Review Organize Plan" to preview file moves before approval.';
+const DEFAULT_SCAN_SUMMARY = "Run a scan to load project insights.";
 const EMPTY_RESULT_TEXT = "Run a scan to preview grouped projects.";
 const DEFAULT_PAGE_SIZE = 50;
 const PAGE_SIZE_OPTIONS = [25, 50, 100, 200];
 const DIFF_SAMPLE_LIMIT = 12;
+const IMAGE_PREVIEW_LIMIT = 20;
 
 const initialState = {
   selectedFolder: "",
@@ -18,6 +20,11 @@ const initialState = {
   pageSize: DEFAULT_PAGE_SIZE,
   currentPage: 1,
   busyAction: null,
+  backendHealth: "checking",
+  scanResult: null,
+  projectFilter: "",
+  selectedProjectName: "",
+  showRawPayload: false,
 };
 
 function reducer(state, action) {
@@ -28,6 +35,10 @@ function reducer(state, action) {
       return { ...state, resultText: action.payload };
     case "SET_BUSY":
       return { ...state, busyAction: action.payload };
+    case "SET_BACKEND_HEALTH":
+      return { ...state, backendHealth: action.payload };
+    case "TOGGLE_RAW":
+      return { ...state, showRawPayload: !state.showRawPayload };
     case "SELECT_FOLDER":
       return {
         ...state,
@@ -39,6 +50,23 @@ function reducer(state, action) {
         moveFilter: "",
         pageSize: DEFAULT_PAGE_SIZE,
         currentPage: 1,
+        scanResult: null,
+        projectFilter: "",
+        selectedProjectName: "",
+      };
+    case "LOAD_SCAN":
+      return {
+        ...state,
+        scanResult: action.payload,
+        pendingPlan: null,
+        displayedOperations: [],
+        reviewSummary: DEFAULT_REVIEW_MESSAGE,
+        planDiff: null,
+        moveFilter: "",
+        pageSize: DEFAULT_PAGE_SIZE,
+        currentPage: 1,
+        projectFilter: "",
+        selectedProjectName: action.payload.projects.length > 0 ? action.payload.projects[0].name : "",
       };
     case "LOAD_PLAN":
       return {
@@ -86,6 +114,10 @@ function reducer(state, action) {
       return { ...state, pageSize: action.payload, currentPage: 1 };
     case "SET_PAGE":
       return { ...state, currentPage: action.payload };
+    case "SET_PROJECT_FILTER":
+      return { ...state, projectFilter: action.payload };
+    case "SELECT_PROJECT":
+      return { ...state, selectedProjectName: action.payload };
     default:
       return state;
   }
@@ -174,6 +206,16 @@ function diffLines(diff) {
   return lines;
 }
 
+function backendHealthLabel(health) {
+  if (health === "healthy") {
+    return "Healthy";
+  }
+  if (health === "unreachable") {
+    return "Unreachable";
+  }
+  return "Checking";
+}
+
 export function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
 
@@ -182,6 +224,51 @@ export function App() {
   const canScan = !isBusy && Boolean(state.selectedFolder);
   const canApprove = !isBusy && Boolean(state.pendingPlan) && state.pendingPlan.operations.length > 0;
   const canDiscard = !isBusy && Boolean(state.pendingPlan);
+
+  const scanProjects = state.scanResult ? state.scanResult.projects : [];
+
+  const filteredProjects = useMemo(() => {
+    const needle = state.projectFilter.trim().toLowerCase();
+    if (!needle) {
+      return scanProjects;
+    }
+
+    return scanProjects.filter((project) => {
+      const haystack = `${project.name} ${project.category} ${project.capture_date}`.toLowerCase();
+      return haystack.includes(needle);
+    });
+  }, [scanProjects, state.projectFilter]);
+
+  const selectedProject = useMemo(() => {
+    if (!state.selectedProjectName) {
+      return null;
+    }
+    return filteredProjects.find((project) => project.name === state.selectedProjectName) || null;
+  }, [filteredProjects, state.selectedProjectName]);
+
+  useEffect(() => {
+    if (filteredProjects.length === 0) {
+      if (state.selectedProjectName) {
+        dispatch({ type: "SELECT_PROJECT", payload: "" });
+      }
+      return;
+    }
+
+    const exists = filteredProjects.some((project) => project.name === state.selectedProjectName);
+    if (!exists) {
+      dispatch({ type: "SELECT_PROJECT", payload: filteredProjects[0].name });
+    }
+  }, [filteredProjects, state.selectedProjectName]);
+
+  const categorySummary = useMemo(() => {
+    const counts = new Map();
+    for (const project of scanProjects) {
+      const key = project.category;
+      counts.set(key, (counts.get(key) || 0) + project.image_count);
+    }
+
+    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+  }, [scanProjects]);
 
   const filteredOperations = useMemo(() => {
     const needle = state.moveFilter.trim().toLowerCase();
@@ -213,6 +300,27 @@ export function App() {
     dispatch({ type: "SET_RESULT", payload: toResultText(payload) });
   }
 
+  async function refreshBackendHealth(silent) {
+    try {
+      dispatch({ type: "SET_BACKEND_HEALTH", payload: "checking" });
+      const api = requireAPI();
+      await api.checkBackendHealth();
+      dispatch({ type: "SET_BACKEND_HEALTH", payload: "healthy" });
+      if (!silent) {
+        setStatus("Backend is reachable.");
+      }
+    } catch (error) {
+      dispatch({ type: "SET_BACKEND_HEALTH", payload: "unreachable" });
+      if (!silent) {
+        setStatus(error.message || "Backend is unreachable.");
+      }
+    }
+  }
+
+  useEffect(() => {
+    refreshBackendHealth(true);
+  }, []);
+
   async function selectFolder() {
     try {
       setBusy("select");
@@ -234,6 +342,8 @@ export function App() {
       setStatus("Scanning and classifying images...");
       const api = requireAPI();
       const result = await api.scanFolder(state.selectedFolder);
+      dispatch({ type: "LOAD_SCAN", payload: result });
+      dispatch({ type: "SET_BACKEND_HEALTH", payload: "healthy" });
       setResult(result);
       setStatus(`Scan complete. Found ${result.project_count} projects across ${result.image_count} images.`);
     } catch (error) {
@@ -261,6 +371,7 @@ export function App() {
           summary: `Dry-run ready: ${result.operations.length} planned move(s) across ${result.project_count} project(s).`,
         },
       });
+      dispatch({ type: "SET_BACKEND_HEALTH", payload: "healthy" });
       setResult(result);
       if (result.operations.length === 0) {
         setStatus("Plan generated. No files need to be moved.");
@@ -303,6 +414,7 @@ export function App() {
             summary: `Plan changed since last review. ${latestPlan.operations.length} move(s) are currently planned.`,
           },
         });
+        dispatch({ type: "SET_BACKEND_HEALTH", payload: "healthy" });
         setResult(latestPlan);
         setStatus("Plan changed since last review. Review changes and approve again.");
         return;
@@ -317,6 +429,7 @@ export function App() {
           summary: `Organize complete: moved ${result.operations.length} file(s) into ${result.project_count} project(s).`,
         },
       });
+      dispatch({ type: "SET_BACKEND_HEALTH", payload: "healthy" });
       setResult(result);
       setStatus(`Organize complete. Moved ${result.operations.length} files into ${result.project_count} projects.`);
     } catch (error) {
@@ -338,6 +451,10 @@ export function App() {
 
   function onFilterChanged(event) {
     dispatch({ type: "SET_FILTER", payload: event.target.value });
+  }
+
+  function onProjectFilterChanged(event) {
+    dispatch({ type: "SET_PROJECT_FILTER", payload: event.target.value });
   }
 
   function onPageSizeChanged(event) {
@@ -362,13 +479,27 @@ export function App() {
     dispatch({ type: "SET_PAGE", payload: currentPage + 1 });
   }
 
+  function toggleRawPayload() {
+    dispatch({ type: "TOGGLE_RAW" });
+  }
+
   const diff = state.planDiff;
   const lines = diff ? diffLines(diff) : [];
   const hasMoves = state.displayedOperations.length > 0;
+  const healthLabel = backendHealthLabel(state.backendHealth);
 
   return (
     <div className="app-shell">
-      <h1>FrameSort</h1>
+      <header className="topbar">
+        <div>
+          <h1>FrameSort</h1>
+          <p className="subtitle">Review-first photo organization workflow</p>
+        </div>
+        <div className="topbar-right">
+          <div className={`health-chip ${state.backendHealth}`}>Backend: {healthLabel}</div>
+          <button onClick={() => refreshBackendHealth(false)} disabled={isBusy}>Refresh Backend</button>
+        </div>
+      </header>
 
       <div className="actions">
         <button onClick={selectFolder} disabled={isBusy}>Select Folder</button>
@@ -376,10 +507,129 @@ export function App() {
         <button onClick={reviewOrganizePlan} disabled={!canReview}>Review Organize Plan</button>
       </div>
 
-      <div id="folder">{state.selectedFolder || "No folder selected."}</div>
-      <div id="status">{state.statusMessage}</div>
+      <div id="folder" className="folder-path">{state.selectedFolder || "No folder selected."}</div>
+      <div id="status" className="status-line">{state.statusMessage}</div>
 
-      <section id="review-panel">
+      <section className="panel" id="scan-panel">
+        <h2>Scan Insights</h2>
+        <div className="scan-summary">
+          {state.scanResult
+            ? `Last scan: ${state.scanResult.project_count} project(s), ${state.scanResult.image_count} image(s).`
+            : DEFAULT_SCAN_SUMMARY}
+        </div>
+
+        {state.scanResult ? (
+          <>
+            <div className="kpi-grid">
+              <article className="kpi-card">
+                <div className="kpi-label">Projects</div>
+                <div className="kpi-value">{state.scanResult.project_count}</div>
+              </article>
+              <article className="kpi-card">
+                <div className="kpi-label">Images</div>
+                <div className="kpi-value">{state.scanResult.image_count}</div>
+              </article>
+              <article className="kpi-card">
+                <div className="kpi-label">Categories</div>
+                <div className="kpi-value">{categorySummary.length}</div>
+              </article>
+            </div>
+
+            {categorySummary.length > 0 ? (
+              <div className="category-row">
+                {categorySummary.map(([category, count]) => (
+                  <span key={category} className="category-pill">{category}: {count}</span>
+                ))}
+              </div>
+            ) : null}
+
+            <div className="table-tools">
+              <input
+                placeholder="Filter projects by name, category, or date"
+                value={state.projectFilter}
+                onChange={onProjectFilterChanged}
+                disabled={scanProjects.length === 0}
+              />
+            </div>
+
+            {filteredProjects.length === 0 ? (
+              <div className="note">No projects match the current filter.</div>
+            ) : (
+              <div className="project-layout">
+                <div className="move-table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Project</th>
+                        <th>Category</th>
+                        <th>Date</th>
+                        <th>Images</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredProjects.map((project) => (
+                        <tr
+                          key={project.name}
+                          className={project.name === state.selectedProjectName ? "row-selected" : ""}
+                          onClick={() => dispatch({ type: "SELECT_PROJECT", payload: project.name })}
+                        >
+                          <td>{project.name}</td>
+                          <td>{project.category}</td>
+                          <td>{project.capture_date}</td>
+                          <td>{project.image_count}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <aside className="project-detail">
+                  <h3>Project Detail</h3>
+                  {selectedProject ? (
+                    <>
+                      <div className="detail-meta">{selectedProject.name}</div>
+                      <div className="detail-meta">Category: {selectedProject.category}</div>
+                      <div className="detail-meta">Capture Date: {selectedProject.capture_date}</div>
+                      <div className="detail-meta">Images: {selectedProject.image_count}</div>
+
+                      <div className="move-table-wrap">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>#</th>
+                              <th>File</th>
+                              <th>Category</th>
+                              <th>Source</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {selectedProject.images.slice(0, IMAGE_PREVIEW_LIMIT).map((image, index) => (
+                              <tr key={`${selectedProject.name}:${image.source_path}:${index}`}>
+                                <td>{index + 1}</td>
+                                <td>{image.file_name}</td>
+                                <td>{image.category}</td>
+                                <td>{image.source_path}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {selectedProject.images.length > IMAGE_PREVIEW_LIMIT ? (
+                        <div className="note">Showing first {IMAGE_PREVIEW_LIMIT} image(s) from this project.</div>
+                      ) : null}
+                    </>
+                  ) : (
+                    <div className="note">Select a project to inspect image details.</div>
+                  )}
+                </aside>
+              </div>
+            )}
+          </>
+        ) : null}
+      </section>
+
+      <section id="review-panel" className="panel">
         <h2>Review Plan</h2>
         <div id="review-summary">{state.reviewSummary}</div>
 
@@ -452,7 +702,14 @@ export function App() {
         )}
       </section>
 
-      <pre>{state.resultText}</pre>
+      <section className="panel">
+        <div className="raw-header">
+          <h2>Raw Payload</h2>
+          <button onClick={toggleRawPayload}>{state.showRawPayload ? "Hide" : "Show"} JSON</button>
+        </div>
+
+        {state.showRawPayload ? <pre>{state.resultText}</pre> : <div className="note">Raw payload is hidden.</div>}
+      </section>
     </div>
   );
 }
